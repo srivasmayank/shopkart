@@ -1,0 +1,78 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  CUSTOMER
+  ADMIN
+}
+
+enum OrderStatus {
+  PAYMENT_PENDING
+  PAID
+  CANCELLED
+  SHIPPED
+  DELIVERED
+  REFUNDED
+}
+
+model User {
+  id           Int         @id @default(autoincrement())
+  email        String      @unique
+  passwordHash String      @map("password_hash")
+  role         Role        @default(CUSTOMER)
+  createdAt    DateTime    @default(now()) @map("created_at")
+  orders       Order[]
+
+  @@map("users")
+}
+
+model Product {
+  id         Int         @id @default(autoincrement())
+  name       String
+  pricePaise Int         @map("price_paise") // money in paise, never floats
+  stock      Int
+  createdAt  DateTime    @default(now()) @map("created_at")
+  orderItems OrderItem[]
+
+  @@map("products")
+}
+
+model Order {
+  id         Int         @id @default(autoincrement())
+  userId     Int         @map("user_id")
+  user       User        @relation(fields: [userId], references: [id])
+  status     OrderStatus @default(PAYMENT_PENDING)
+  totalPaise Int         @map("total_paise")
+  createdAt  DateTime    @default(now()) @map("created_at")
+  items      OrderItem[]
+
+  @@map("orders")
+}
+
+model OrderItem {
+  id         Int     @id @default(autoincrement())
+  orderId    Int     @map("order_id")
+  order      Order   @relation(fields: [orderId], references: [id])
+  productId  Int     @map("product_id")
+  product    Product @relation(fields: [productId], references: [id])
+  quantity   Int
+  pricePaise Int     @map("price_paise") // price frozen at purchase time (denormalized)
+
+  @@map("order_items")
+}
+
+model IdempotencyKey {
+  key       String   @id
+  userId    Int      @map("user_id")
+  response  Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("idempotency_keys")
+}
+
