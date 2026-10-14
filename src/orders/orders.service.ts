@@ -28,6 +28,10 @@ export class OrdersService {
         throw new ConflictException(`Product ${p.id} out of stock`);
       }
 
+      // In real applications, tax calculation, discount validation, or coupon checks
+      // happen here (~10ms). This exposes the check-then-act race window.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
       // Flawed step: computes new stock based on stale read and overwrites
       await this.prisma.product.update({
         where: { id: p.id },
