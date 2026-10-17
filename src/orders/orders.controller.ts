@@ -1,7 +1,9 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
+  Headers,
   Param,
   ParseIntPipe,
   Post,
@@ -17,6 +19,25 @@ import { CurrentUser, JwtUser } from '../auth/current-user.decorator';
 export class OrdersController {
   constructor(private readonly orders: OrdersService) {}
 
+  /**
+   * Chapter 4.8 & 4.9: Production order checkout.
+   * Requires Idempotency-Key header; executes atomic conditional update in transaction.
+   */
+  @Post()
+  create(
+    @CurrentUser() user: JwtUser,
+    @Headers('idempotency-key') key: string | undefined,
+    @Body() dto: CreateOrderDto,
+  ) {
+    if (!key) {
+      throw new BadRequestException('Idempotency-Key header is required');
+    }
+    return this.orders.placeOrder(user.sub, key, dto);
+  }
+
+  /**
+   * Chapter 4.7: Naive checkout endpoint preserved for race condition demonstration.
+   */
   @Post('naive')
   createNaive(
     @CurrentUser() user: JwtUser,
@@ -38,4 +59,3 @@ export class OrdersController {
     return this.orders.findMine(user.sub, id);
   }
 }
-
