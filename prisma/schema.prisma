@@ -44,13 +44,15 @@ model Product {
 }
 
 model Order {
-  id         Int         @id @default(autoincrement())
-  userId     Int         @map("user_id")
-  user       User        @relation(fields: [userId], references: [id])
-  status     OrderStatus @default(PAYMENT_PENDING)
-  totalPaise Int         @map("total_paise")
-  createdAt  DateTime    @default(now()) @map("created_at")
-  items      OrderItem[]
+  id                Int         @id @default(autoincrement())
+  userId            Int         @map("user_id")
+  user              User        @relation(fields: [userId], references: [id])
+  status            OrderStatus @default(PAYMENT_PENDING)
+  totalPaise        Int         @map("total_paise")
+  razorpayOrderId   String?     @unique @map("razorpay_order_id")
+  razorpayPaymentId String?     @map("razorpay_payment_id")
+  createdAt         DateTime    @default(now()) @map("created_at")
+  items             OrderItem[]
 
   @@map("orders")
 }

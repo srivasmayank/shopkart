@@ -58,4 +58,16 @@ export class OrdersController {
   ) {
     return this.orders.findMine(user.sub, id);
   }
+
+  /**
+   * Chapter 5.2: Initiates payment for an order.
+   * Generates or fetches an idempotent Razorpay order in paise for the client checkout.
+   */
+  @Post(':id/pay')
+  pay(
+    @CurrentUser() user: JwtUser,
+    @Param('id', ParseIntPipe) id: number,
+  ) {
+    return this.orders.createPaymentOrder(user.sub, id);
+  }
 }

@@ -1,15 +1,20 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { OrderStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { PaymentsService } from '../payments/payments.service';
 import { CreateOrderDto } from './orders.dto';
 
 @Injectable()
 export class OrdersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly payments: PaymentsService,
+  ) {}
 
   /**
    * Chapter 4.8: The Fix - Atomic conditional updates inside a transaction.
@@ -156,5 +161,55 @@ export class OrdersService {
       include: { items: true },
       orderBy: { createdAt: 'desc' },
     });
+  }
+
+  /**
+   * Chapter 5.2: Initiates payment for an order with Razorpay.
+   * 1. IDOR prevention: verifies order belongs to caller (findMine).
+   * 2. Checks order state is PAYMENT_PENDING.
+   * 3. Idempotent: returns existing razorpayOrderId if already created.
+   * 4. Persists razorpayOrderId in atomic record update.
+   */
+  async createPaymentOrder(userId: number, orderId: number) {
+    const order = await this.findMine(userId, orderId);
+
+    if (order.status !== OrderStatus.PAYMENT_PENDING) {
+      throw new BadRequestException(
+        `Order ${orderId} cannot be paid because it is already ${order.status}`,
+      );
+    }
+
+    // Idempotent return if already generated
+    if (order.razorpayOrderId) {
+      return {
+        orderId: order.id,
+        razorpayOrderId: order.razorpayOrderId,
+        amountPaise: order.totalPaise,
+        currency: 'INR',
+        keyId: this.payments.getPublicKey(),
+      };
+    }
+
+    const rzpOrder = await this.payments.createRazorpayOrder(
+      order.totalPaise,
+      `order_rcpt_${order.id}`,
+      {
+        orderId: String(order.id),
+        userId: String(userId),
+      },
+    );
+
+    await this.prisma.order.update({
+      where: { id: order.id },
+      data: { razorpayOrderId: rzpOrder.id },
+    });
+
+    return {
+      orderId: order.id,
+      razorpayOrderId: rzpOrder.id,
+      amountPaise: order.totalPaise,
+      currency: 'INR',
+      keyId: this.payments.getPublicKey(),
+    };
   }
 }
