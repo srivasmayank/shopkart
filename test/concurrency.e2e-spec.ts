@@ -2,6 +2,7 @@ import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import request from 'supertest';
 import { randomUUID } from 'node:crypto';
+import * as bcrypt from 'bcrypt';
 import { AppModule } from '../src/app.module';
 import { PrismaService } from '../src/prisma/prisma.service';
 
@@ -26,7 +27,25 @@ describe('ShopKart Concurrency & Correctness (E2E)', () => {
     );
     await app.init();
 
+    const server = app.getHttpServer();
+    if (server && typeof server.setMaxListeners === 'function') {
+      server.setMaxListeners(100);
+    }
+
     prisma = app.get(PrismaService);
+
+    // Ensure test users exist with deterministic credentials
+    const passwordHash = await bcrypt.hash('secret123', 10);
+    await prisma.user.upsert({
+      where: { email: 'asha@test.com' },
+      update: { passwordHash, role: 'ADMIN' },
+      create: { email: 'asha@test.com', passwordHash, role: 'ADMIN' },
+    });
+    await prisma.user.upsert({
+      where: { email: 'ravi@test.com' },
+      update: { passwordHash, role: 'CUSTOMER' },
+      create: { email: 'ravi@test.com', passwordHash, role: 'CUSTOMER' },
+    });
 
     // Login as admin
     const adminLogin = await request(app.getHttpServer())
@@ -91,12 +110,22 @@ describe('ShopKart Concurrency & Correctness (E2E)', () => {
       await request(app.getHttpServer())
         .post('/orders')
         .set('Authorization', `Bearer ${customerToken}`)
-        .send({ items: [{ productId: 2, quantity: 1 }] })
+        .send({ items: [{ productId: 1, quantity: 1 }] })
         .expect(400);
     });
 
     it('should return identical response and avoid duplicate inventory decrement on retries', async () => {
-      const initialProduct = await prisma.product.findUniqueOrThrow({ where: { id: 2 } });
+      // Dynamically create a test product
+      const prodRes = await request(app.getHttpServer())
+        .post('/products')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({
+          name: `Jest Idem Product #${Date.now()}`,
+          pricePaise: 149900,
+          stock: 10,
+        })
+        .expect(201);
+      const testProductId = prodRes.body.id;
       const key = `jest-idem-${randomUUID()}`;
 
       // First call
@@ -104,7 +133,7 @@ describe('ShopKart Concurrency & Correctness (E2E)', () => {
         .post('/orders')
         .set('Authorization', `Bearer ${customerToken}`)
         .set('Idempotency-Key', key)
-        .send({ items: [{ productId: 2, quantity: 1 }] })
+        .send({ items: [{ productId: testProductId, quantity: 1 }] })
         .expect(201);
 
       const orderId = firstRes.body.id;
@@ -114,25 +143,38 @@ describe('ShopKart Concurrency & Correctness (E2E)', () => {
         .post('/orders')
         .set('Authorization', `Bearer ${customerToken}`)
         .set('Idempotency-Key', key)
-        .send({ items: [{ productId: 2, quantity: 1 }] });
+        .send({ items: [{ productId: testProductId, quantity: 1 }] })
+        .expect(201);
 
       expect(replayRes.body.id).toBe(orderId);
 
-      // Verify stock was decremented exactly once
-      const finalProduct = await prisma.product.findUniqueOrThrow({ where: { id: 2 } });
-      expect(finalProduct.stock).toBe(initialProduct.stock - 1);
+      // Verify stock was decremented exactly once (10 -> 9)
+      const finalProduct = await prisma.product.findUniqueOrThrow({ where: { id: testProductId } });
+      expect(finalProduct.stock).toBe(9);
     });
   });
 
   describe('IDOR Protection', () => {
     it('should return 404 when querying an order belonging to another user', async () => {
+      // Dynamically create a product for this test
+      const prodRes = await request(app.getHttpServer())
+        .post('/products')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({
+          name: `Jest IDOR Product #${Date.now()}`,
+          pricePaise: 99900,
+          stock: 5,
+        })
+        .expect(201);
+      const testProductId = prodRes.body.id;
+
       // Create an order as customer
       const key = `jest-idor-${randomUUID()}`;
       const orderRes = await request(app.getHttpServer())
         .post('/orders')
         .set('Authorization', `Bearer ${customerToken}`)
         .set('Idempotency-Key', key)
-        .send({ items: [{ productId: 2, quantity: 1 }] })
+        .send({ items: [{ productId: testProductId, quantity: 1 }] })
         .expect(201);
 
       const orderId = orderRes.body.id;
