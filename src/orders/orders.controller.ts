@@ -70,4 +70,21 @@ export class OrdersController {
   ) {
     return this.orders.createPaymentOrder(user.sub, id);
   }
+
+  /**
+   * Chapter 5.5: Cancel an order in PAYMENT_PENDING state.
+   * Atomically transitions order to CANCELLED and restores reserved inventory.
+   * IDOR protected: verifies order belongs to caller.
+   */
+  @Post(':id/cancel')
+  cancel(
+    @CurrentUser() user: JwtUser,
+    @Param('id', ParseIntPipe) id: number,
+  ) {
+    return this.orders.cancelOrder({
+      orderId: id,
+      userId: user.sub,
+      reason: 'User requested cancellation',
+    });
+  }
 }

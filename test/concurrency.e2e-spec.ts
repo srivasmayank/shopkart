@@ -1,7 +1,7 @@
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import request from 'supertest';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHmac } from 'node:crypto';
 import * as bcrypt from 'bcrypt';
 import { AppModule } from '../src/app.module';
 import { PrismaService } from '../src/prisma/prisma.service';
@@ -185,6 +185,150 @@ describe('ShopKart Concurrency & Correctness (E2E)', () => {
         .get(`/orders/${orderId}`)
         .set('Authorization', `Bearer ${adminToken}`)
         .expect(404);
+    });
+  });
+
+  describe('Day 9: Webhook Security & Order State Machine', () => {
+    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET || 'rzp_webhook_secret_shopkart2026';
+
+    function signPayload(payloadStr: string) {
+      return createHmac('sha256', webhookSecret).update(payloadStr).digest('hex');
+    }
+
+    it('should reject webhook requests with invalid or tampered HMAC signatures', async () => {
+      const payload = JSON.stringify({ event: 'ping', test: true });
+
+      // Missing signature
+      await request(app.getHttpServer())
+        .post('/payments/webhook')
+        .send(payload)
+        .set('Content-Type', 'application/json')
+        .expect(400);
+
+      // Forged signature
+      await request(app.getHttpServer())
+        .post('/payments/webhook')
+        .send(payload)
+        .set('Content-Type', 'application/json')
+        .set('x-razorpay-signature', '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef')
+        .expect(401);
+    });
+
+    it('should transition order to PAID and guard against illegal cancellations', async () => {
+      // 1. Create a product with stock = 10
+      const prodRes = await request(app.getHttpServer())
+        .post('/products')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({
+          name: `Jest SM Shoe #${Date.now()}`,
+          pricePaise: 299900,
+          stock: 10,
+        })
+        .expect(201);
+      const productId = prodRes.body.id;
+
+      // 2. Checkout 2 units -> stock becomes 8, status = PAYMENT_PENDING
+      const orderRes = await request(app.getHttpServer())
+        .post('/orders')
+        .set('Authorization', `Bearer ${customerToken}`)
+        .set('Idempotency-Key', `jest-sm-paid-${randomUUID()}`)
+        .send({ items: [{ productId, quantity: 2 }] })
+        .expect(201);
+      const orderId = orderRes.body.id;
+
+      // 3. Initiate payment
+      const payRes = await request(app.getHttpServer())
+        .post(`/orders/${orderId}/pay`)
+        .set('Authorization', `Bearer ${customerToken}`)
+        .expect(201);
+      const rzpOrderId = payRes.body.razorpayOrderId;
+
+      // 4. Send signed order.paid webhook
+      const webhookPayload = JSON.stringify({
+        event: 'order.paid',
+        payload: {
+          order: { entity: { id: rzpOrderId, amount: 599800, status: 'paid' } },
+          payment: { entity: { id: 'pay_jest_123', order_id: rzpOrderId, amount: 599800, status: 'captured' } },
+        },
+      });
+
+      const res = await request(app.getHttpServer())
+        .post('/payments/webhook')
+        .send(webhookPayload)
+        .set('Content-Type', 'application/json')
+        .set('x-razorpay-signature', signPayload(webhookPayload))
+        .expect(200);
+
+      expect(res.body.action).toBe('TRANSITIONED');
+      expect(res.body.status).toBe('PAID');
+
+      // 5. Verify database
+      const dbOrder = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+      expect(dbOrder.status).toBe('PAID');
+      expect(dbOrder.razorpayPaymentId).toBe('pay_jest_123');
+
+      // 6. State guard: cannot cancel a PAID order
+      const failPayload = JSON.stringify({
+        event: 'payment.failed',
+        payload: {
+          payment: { entity: { id: 'pay_failed_456', order_id: rzpOrderId } },
+        },
+      });
+      await request(app.getHttpServer())
+        .post('/payments/webhook')
+        .send(failPayload)
+        .set('Content-Type', 'application/json')
+        .set('x-razorpay-signature', signPayload(failPayload))
+        .expect(409);
+    });
+
+    it('should transition order to CANCELLED and restore inventory atomically', async () => {
+      // 1. Create product with stock = 5
+      const prodRes = await request(app.getHttpServer())
+        .post('/products')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({
+          name: `Jest SM Cancel Item #${Date.now()}`,
+          pricePaise: 120000,
+          stock: 5,
+        })
+        .expect(201);
+      const productId = prodRes.body.id;
+
+      // 2. Checkout 3 units -> stock becomes 2
+      const orderRes = await request(app.getHttpServer())
+        .post('/orders')
+        .set('Authorization', `Bearer ${customerToken}`)
+        .set('Idempotency-Key', `jest-sm-cancel-${randomUUID()}`)
+        .send({ items: [{ productId, quantity: 3 }] })
+        .expect(201);
+      const orderId = orderRes.body.id;
+
+      const pStockAfterOrder = await prisma.product.findUniqueOrThrow({ where: { id: productId } });
+      expect(pStockAfterOrder.stock).toBe(2);
+
+      // 3. Customer calls cancel endpoint
+      const cancelRes = await request(app.getHttpServer())
+        .post(`/orders/${orderId}/cancel`)
+        .set('Authorization', `Bearer ${customerToken}`)
+        .expect(201);
+
+      expect(cancelRes.body.status).toBe('CANCELLED');
+
+      // 4. Verify inventory restored atomically back to 5
+      const pStockAfterCancel = await prisma.product.findUniqueOrThrow({ where: { id: productId } });
+      expect(pStockAfterCancel.stock).toBe(5);
+
+      // 5. Idempotent cancel: cancelling again returns ALREADY_CANCELLED and does not increment stock to 8
+      const cancelAgainRes = await request(app.getHttpServer())
+        .post(`/orders/${orderId}/cancel`)
+        .set('Authorization', `Bearer ${customerToken}`)
+        .expect(201);
+      expect(cancelAgainRes.body.status).toBe('ALREADY_CANCELLED');
+      expect(cancelAgainRes.body.order.status).toBe('CANCELLED');
+
+      const pStockAfterAgain = await prisma.product.findUniqueOrThrow({ where: { id: productId } });
+      expect(pStockAfterAgain.stock).toBe(5);
     });
   });
 });

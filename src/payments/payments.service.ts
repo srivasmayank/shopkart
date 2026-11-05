@@ -98,7 +98,7 @@ export class PaymentsService {
       const expectedSignature = hmac.digest('hex');
 
       const expectedBuffer = Buffer.from(expectedSignature, 'utf8');
-      const actualBuffer = Buffer.from(signature, 'utf8');
+      const actualBuffer = Buffer.from(signature.trim().toLowerCase(), 'utf8');
 
       if (expectedBuffer.length !== actualBuffer.length) {
         return false;

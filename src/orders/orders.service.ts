@@ -1,8 +1,11 @@
 import {
   BadRequestException,
   ConflictException,
+  Inject,
   Injectable,
+  Logger,
   NotFoundException,
+  forwardRef,
 } from '@nestjs/common';
 import { OrderStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
@@ -11,8 +14,11 @@ import { CreateOrderDto } from './orders.dto';
 
 @Injectable()
 export class OrdersService {
+  private readonly logger = new Logger(OrdersService.name);
+
   constructor(
     private readonly prisma: PrismaService,
+    @Inject(forwardRef(() => PaymentsService))
     private readonly payments: PaymentsService,
   ) {}
 
@@ -211,5 +217,135 @@ export class OrdersService {
       currency: 'INR',
       keyId: this.payments.getPublicKey(),
     };
+  }
+
+  /**
+   * Chapter 5.5: Order State Machine transition: PAYMENT_PENDING -> PAID.
+   * Enforced via single-statement conditional update to prevent race conditions.
+   * Idempotent: duplicate webhook deliveries return existing order without error.
+   */
+  async markOrderPaid(razorpayOrderId: string, paymentId?: string) {
+    // 1. Conditional update: only update if status is currently PAYMENT_PENDING
+    const updateResult = await this.prisma.order.updateMany({
+      where: {
+        razorpayOrderId,
+        status: OrderStatus.PAYMENT_PENDING,
+      },
+      data: {
+        status: OrderStatus.PAID,
+        razorpayPaymentId: paymentId ?? null,
+      },
+    });
+
+    if (updateResult.count === 1) {
+      const order = await this.prisma.order.findUniqueOrThrow({
+        where: { razorpayOrderId },
+        include: { items: true },
+      });
+      this.logger.log(
+        `Order #${order.id} transitioned PAYMENT_PENDING -> PAID (razorpayOrderId: ${razorpayOrderId}, paymentId: ${paymentId})`,
+      );
+      return { status: 'TRANSITIONED', order };
+    }
+
+    // 2. If 0 rows updated, verify current state
+    const existing = await this.prisma.order.findUnique({
+      where: { razorpayOrderId },
+      include: { items: true },
+    });
+
+    if (!existing) {
+      throw new NotFoundException(`Order with Razorpay order ID ${razorpayOrderId} not found`);
+    }
+
+    if (existing.status === OrderStatus.PAID) {
+      this.logger.log(`Webhook replay: Order #${existing.id} is already PAID`);
+      return { status: 'ALREADY_PAID', order: existing };
+    }
+
+    // Strict state guard: cannot mark CANCELLED or other status as PAID
+    this.logger.warn(
+      `Illegal transition attempt: Order #${existing.id} is in status ${existing.status}, cannot transition to PAID`,
+    );
+    throw new ConflictException(
+      `Order #${existing.id} is in status ${existing.status} and cannot be marked as PAID`,
+    );
+  }
+
+  /**
+   * Chapter 5.5 & 5.6: Order State Machine transition: PAYMENT_PENDING -> CANCELLED.
+   * 1. State Guard: Only PAYMENT_PENDING orders can be cancelled.
+   * 2. Single-statement conditional update: status = 'CANCELLED' WHERE status = 'PAYMENT_PENDING'.
+   * 3. Atomically restores reserved product inventory inside the transaction.
+   * 4. Double-restoration protection: if order is already CANCELLED, returns immediately.
+   */
+  async cancelOrder(options: {
+    orderId?: number;
+    razorpayOrderId?: string;
+    userId?: number;
+    reason?: string;
+  }) {
+    return await this.prisma.$transaction(async (tx) => {
+      const whereClause: Prisma.OrderWhereInput = {};
+      if (options.orderId) whereClause.id = options.orderId;
+      if (options.razorpayOrderId) whereClause.razorpayOrderId = options.razorpayOrderId;
+      if (options.userId) whereClause.userId = options.userId;
+
+      const order = await tx.order.findFirst({
+        where: whereClause,
+        include: { items: true },
+      });
+
+      if (!order) {
+        throw new NotFoundException('Order not found');
+      }
+
+      // Idempotency: if already CANCELLED, do NOT restore stock again
+      if (order.status === OrderStatus.CANCELLED) {
+        this.logger.log(`Order #${order.id} is already CANCELLED`);
+        return { status: 'ALREADY_CANCELLED', order };
+      }
+
+      // Strict state guard: cannot cancel a PAID order without a refund process
+      if (order.status !== OrderStatus.PAYMENT_PENDING) {
+        throw new ConflictException(
+          `Cannot cancel order #${order.id} with status ${order.status}. Only PAYMENT_PENDING orders can be cancelled.`,
+        );
+      }
+
+      // Atomic conditional update
+      const updateRes = await tx.order.updateMany({
+        where: {
+          id: order.id,
+          status: OrderStatus.PAYMENT_PENDING,
+        },
+        data: {
+          status: OrderStatus.CANCELLED,
+        },
+      });
+
+      if (updateRes.count === 0) {
+        throw new ConflictException(`Concurrent status modification on order #${order.id}`);
+      }
+
+      // Atomically restore product stock
+      for (const item of order.items) {
+        await tx.product.update({
+          where: { id: item.productId },
+          data: { stock: { increment: item.quantity } },
+        });
+      }
+
+      this.logger.log(
+        `Order #${order.id} cancelled. Restored stock for ${order.items.length} line items. Reason: ${options.reason ?? 'None provided'}`,
+      );
+
+      const updatedOrder = await tx.order.findUniqueOrThrow({
+        where: { id: order.id },
+        include: { items: true },
+      });
+
+      return { status: 'CANCELLED', order: updatedOrder };
+    });
   }
 }
