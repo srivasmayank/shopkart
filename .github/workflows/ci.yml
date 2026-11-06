@@ -26,6 +26,9 @@ jobs:
     env:
       DATABASE_URL: postgresql://shop:shop@localhost:5432/shopkart_test
       JWT_SECRET: shopkart-ci-super-secret-key-2026
+      RAZORPAY_KEY_ID: rzp_test_shopkart2026
+      RAZORPAY_KEY_SECRET: rzp_secret_shopkart2026
+      RAZORPAY_WEBHOOK_SECRET: rzp_webhook_secret_shopkart2026
       PORT: 3000
     steps:
       - uses: actions/checkout@v4

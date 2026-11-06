@@ -5,10 +5,12 @@ import { randomUUID, createHmac } from 'node:crypto';
 import * as bcrypt from 'bcrypt';
 import { AppModule } from '../src/app.module';
 import { PrismaService } from '../src/prisma/prisma.service';
+import { PaymentsService } from '../src/payments/payments.service';
 
 describe('ShopKart Concurrency & Correctness (E2E)', () => {
   let app: INestApplication;
   let prisma: PrismaService;
+  let payments: PaymentsService;
   let adminToken: string;
   let customerToken: string;
 
@@ -33,6 +35,7 @@ describe('ShopKart Concurrency & Correctness (E2E)', () => {
     }
 
     prisma = app.get(PrismaService);
+    payments = app.get(PaymentsService);
 
     // Ensure test users exist with deterministic credentials
     const passwordHash = await bcrypt.hash('secret123', 10);
@@ -189,10 +192,9 @@ describe('ShopKart Concurrency & Correctness (E2E)', () => {
   });
 
   describe('Day 9: Webhook Security & Order State Machine', () => {
-    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET || 'rzp_webhook_secret_shopkart2026';
-
     function signPayload(payloadStr: string) {
-      return createHmac('sha256', webhookSecret).update(payloadStr).digest('hex');
+      const secret = payments.getWebhookSecret();
+      return createHmac('sha256', secret).update(payloadStr).digest('hex');
     }
 
     it('should reject webhook requests with invalid or tampered HMAC signatures', async () => {

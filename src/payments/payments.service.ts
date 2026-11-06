@@ -20,9 +20,12 @@ export class PaymentsService {
   private readonly isMockMode: boolean;
 
   constructor(private readonly config: ConfigService) {
-    this.keyId = this.config.get<string>('RAZORPAY_KEY_ID', 'rzp_test_placeholder');
-    this.keySecret = this.config.get<string>('RAZORPAY_KEY_SECRET', 'secret_placeholder');
-    this.webhookSecret = this.config.get<string>('RAZORPAY_WEBHOOK_SECRET', 'webhook_secret_placeholder');
+    this.keyId = this.config.get<string>('RAZORPAY_KEY_ID', 'rzp_test_shopkart2026');
+    this.keySecret = this.config.get<string>('RAZORPAY_KEY_SECRET', 'rzp_secret_shopkart2026');
+    this.webhookSecret = this.config.get<string>(
+      'RAZORPAY_WEBHOOK_SECRET',
+      'rzp_webhook_secret_shopkart2026',
+    );
 
     // Enable mock mode when running with placeholders or offline test keys
     this.isMockMode =
@@ -43,6 +46,10 @@ export class PaymentsService {
 
   getPublicKey(): string {
     return this.keyId;
+  }
+
+  getWebhookSecret(): string {
+    return this.webhookSecret;
   }
 
   /**
